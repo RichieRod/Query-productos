@@ -1,0 +1,203 @@
+/*
+ Crear tabla con SEQUENCE
+ */
+
+CREATE SEQUENCE producto_id_seq;
+
+CREATE TABLE productos(
+    id INT DEFAULT nextval('producto_id_seq') NOT NULL,
+    nombre VARCHAR(50) NOT NULL,
+    descripcion VARCHAR(200) NOT NULL,
+    precio NUMERIC(10,2) NOT NULL,
+    cantidad INT NOT NULL,
+    SKU VARCHAR(20) NOT NULL,
+    PRIMARY KEY (id)
+);
+
+
+/*
+ Mostrar  de la tablaA
+ */
+
+SELECT *FROM productos;
+
+SELECT *FROM clientes;
+
+SELECT *FROM ordenes;
+
+
+/*
+ Actualizar un registro de la tabla productos
+ */
+
+UPDATE productos
+SET nombre = 'Legend montblanc'
+WHERE id = 2;
+
+
+/*
+ UPSERT
+ */
+
+INSERT INTO productos(id,nombre, descripcion, precio, cantidad, sku)
+VALUES(6,'Bleu de chanel', 'Perfume con acordes cítricos, cálido especiado y amaderado', 2690, 2, 0223)
+ON CONFLICT(id)
+DO UPDATE SET nombre= 'Bleu de chanel', descripcion= 'Perfume con acordes cítricos, cálido especiado y amaderado',
+precio=2690, cantidad=2, sku=0223
+RETURNING id;
+
+/*
+  información sobre cómo se ejecutará la consulta
+ */
+EXPLAIN SELECT *FROM productos WHERE sku='2950';
+
+
+
+/*
+ Crear indice unico para el campo SKU
+ */
+ CREATE UNIQUE INDEX uk_sku ON productos(sku);
+
+
+
+
+/*
+ Crear 2 tablas, donde se implementa las llaves foraneas en ordenes
+ */
+
+ CREATE TABLE clientes(
+     id SERIAL PRIMARY KEY NOT NULL,
+     nombre VARCHAR(50) NOT NULL,
+     apellido_paterno VARCHAR(50) NOT NULL,
+     RFC VARCHAR(15) NOT NULL
+ );
+ALTER TABLE ordenes ADD COLUMN cliente_id INT REFERENCES clientes(id) ON DELETE CASCADE;
+
+
+ALTER TABLE clientes
+ADD COLUMN apellido_materno VARCHAR(50) NOT NULL;
+
+CREATE TABLE ordenes(
+    id SERIAL PRIMARY KEY NOT NULL,
+    cliente_id INT references clientes(id) ON DELETE CASCADE,
+    producto_id INT references productos(id) ON DELETE RESTRICT,
+    cantidad INT NOT NULL,
+    fecha TIMESTAMP DEFAULT NOW()
+);
+
+/*
+ Constrain check para restringirn valores y validar datos
+ */
+
+ALTER TABLE ordenes ADD CONSTRAINT ck_cantidad CHECK (cantidad>0);
+ALTER TABLE productos ADD CONSTRAINT ck_precio CHECK (precio>0);
+ALTER TABLE productos ADD CONSTRAINT ck_cantidad CHECK(cantidad>=0);
+
+
+/*
+ Left join que devuelva todos los clientes que compraron algún producto
+ */
+ SELECT *FROM clientes
+ LEFT JOIN ordenes on clientes.id = ordenes.cliente_id;
+
+/*
+ Left join que devuelva los productos que NO fueron comprados
+ */
+SELECT *FROM productos
+LEFT JOIN ordenes  on productos.id = ordenes.producto_id WHERE ordenes.producto_id IS NULL;
+
+/*
+ right join que devuelve todos los clientes que no realizaron una compra
+ */
+SELECT *FROM clientes
+LEFT JOIN  ordenes on clientes.id = ordenes.cliente_id WHERE ordenes.cliente_id IS NULL;
+
+
+/*
+ Indice de búsqueda de texto (FTS)
+ */
+CREATE INDEX idx_productos_descripcion ON productos USING GIN(to_tsvector('spanish',descripcion) );
+
+/*
+ Realizar busqueda utilizando índice (FTS)
+ */
+SELECT *FROM productos
+ WHERE to_tsvector('spanish', descripcion) @@ to_tsquery('spanish', 'lenovo');
+
+
+/*
+Triggers
+ */
+
+CREATE OR REPLACE FUNCTION validar_cantidad()
+RETURNS TRIGGER AS
+$$
+BEGIN
+    IF NEW.cantidad > (SELECT cantidad FROM productos WHERE id = NEW.producto_id) THEN
+        RAISE EXCEPTION 'La cantidad no esta disponible en el inventario';
+    ELSE
+        UPDATE productos SET cantidad = cantidad - NEW.cantidad WHERE id = NEW.producto_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_before_insert
+BEFORE INSERT
+ON ordenes
+FOR EACH ROW
+EXECUTE FUNCTION validar_cantidad();
+
+INSERT INTO ordenes(cliente_id, producto_id, cantidad, fecha) VALUES (8, 27, 60, '2023-10-26');
+INSERT INTO ordenes(cliente_id, producto_id, cantidad, fecha) VALUES (11, 29, 3, '2023-10-26');
+
+
+/*
+Procedimiento almacenado
+ */
+CREATE OR REPLACE PROCEDURE realiza_compra(
+    p_cliente_id INTEGER,
+    p_producto_id INTEGER,
+    p_cantidad INTEGER
+) AS $$
+DECLARE
+    v_existencia INTEGER;
+BEGIN
+    -- Verificar si el id_cliente existe
+    SELECT COUNT(*) INTO v_existencia FROM clientes WHERE id = p_cliente_id;
+    IF v_existencia = 0 THEN
+        RAISE EXCEPTION 'El id_cliente especificado no existe.';
+    END IF;
+
+    -- Obtener la existencia del producto
+    SELECT cantidad INTO v_existencia FROM productos WHERE id = p_producto_id;
+
+    -- Verificar si hay suficiente existencia
+    IF v_existencia >= p_cantidad THEN
+        -- Iniciar la transacción
+        BEGIN
+            -- Actualizar la tabla "productos" con la nueva existencia
+            UPDATE productos SET cantidad = cantidad - p_cantidad WHERE id = p_producto_id;
+            -- Insertar en la tabla "ordenes" la nueva orden de compra
+            IF NOT EXISTS (SELECT 1 FROM clientes WHERE id = p_cliente_id) THEN
+                RAISE EXCEPTION 'El id_cliente especificado no existe.';
+            END IF;
+            INSERT INTO ordenes(cliente_id, producto_id, cantidad, fecha) VALUES (p_cliente_id, p_producto_id, p_cantidad, CURRENT_DATE);
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Realizar un rollback en caso de error
+                ROLLBACK;
+                RAISE;
+        END;
+        -- Hacer commit si no hay errores
+        COMMIT;
+    ELSE
+        RAISE EXCEPTION 'No hay suficiente existencia del producto.';
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+
+CALL realiza_compra(1, 1, 2);
+CALL realiza_compra(2, 2, 1);
+CALL realiza_compra(3, 3, 1);
